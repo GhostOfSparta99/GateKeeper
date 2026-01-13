@@ -2,10 +2,38 @@ import os
 import sys
 import errno
 from fuse import FUSE, FuseOSError, Operations
+import requests
+
+# SUPABASE CONFIG
+SUPABASE_URL = "https://lwstwekouztglkoescog.supabase.co"
+SUPABASE_KEY = "sb_publishable_dmwRDftSHwm7PlapTWGlIg_rVHCrN9y" # Validated Key
 
 class Gatekeeper(Operations):
     def __init__(self, root):
         self.root = root
+        print("✅ [NET] Native Requests Mode Active (Python 3.14 Compatible)")
+
+    def _get_lock_status(self):
+        # Fetch current status from DB via REST API
+        try:
+            # Supabase PostgREST Endpoint
+            url = f"{SUPABASE_URL}/rest/v1/system_status?id=eq.1&select=is_locked"
+            headers = {
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+            }
+            # Short timeout to prevent freezing file explorer
+            response = requests.get(url, headers=headers, timeout=1.5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data and len(data) > 0:
+                    return data[0]['is_locked']
+        except Exception as e:
+            # Silently fail to open (or print if debugging) so we don't crash FUSE
+            print(f"⚠️ Cloud check failed: {e}")
+            
+        return False # Default to unlock if connection fails
 
     def _full_path(self, partial):
         if partial.startswith("/"):
@@ -33,6 +61,13 @@ class Gatekeeper(Operations):
     def open(self, path, flags):
         full_path = self._full_path(path)
         filename = os.path.basename(path)
+
+        # 1. Check Remote Lock Status
+        is_system_locked = self._get_lock_status()
+
+        if is_system_locked:
+            print(f"🔒 [LOCKED] System is locked remotely. Access denied to: {filename}")
+            raise FuseOSError(errno.EACCES)
 
         # SECURITY CHECK
         if "secret" in filename.lower():
