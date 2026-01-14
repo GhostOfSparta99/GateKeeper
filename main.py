@@ -22,16 +22,23 @@ class Gatekeeper(Operations):
                 "apikey": SUPABASE_KEY,
                 "Authorization": f"Bearer {SUPABASE_KEY}",
             }
+            
+            print(f"🔄 Checking Cloud Status...", end="", flush=True)
             # Short timeout to prevent freezing file explorer
             response = requests.get(url, headers=headers, timeout=1.5)
             
             if response.status_code == 200:
                 data = response.json()
                 if data and len(data) > 0:
-                    return data[0]['is_locked']
+                    is_locked = data[0]['is_locked']
+                    print(f" Result: {'🔒 LOCKED' if is_locked else '🔓 UNLOCKED'}")
+                    return is_locked
+            else:
+                print(f" ❌ API Error: {response.status_code}")
+
         except Exception as e:
             # Silently fail to open (or print if debugging) so we don't crash FUSE
-            print(f"⚠️ Cloud check failed: {e}")
+            print(f" ⚠️ Cloud Exception: {e}")
             
         return False # Default to unlock if connection fails
 
@@ -62,19 +69,20 @@ class Gatekeeper(Operations):
         full_path = self._full_path(path)
         filename = os.path.basename(path)
 
-        # 1. Check Remote Lock Status
-        is_system_locked = self._get_lock_status()
-
-        if is_system_locked:
-            print(f"🔒 [LOCKED] System is locked remotely. Access denied to: {filename}")
+        # --- 1. GLOBAL LOCK CHECK (Applies to EVERYTHING) ---
+        # We check the database first. If locked, NO file can be opened.
+        if self._get_lock_status():
+            print(f"🔒 [LOCKED] System is locked. Access denied to: {filename}")
             raise FuseOSError(errno.EACCES)
 
-        # SECURITY CHECK
+        # --- 2. SPECIFIC SECURITY CHECKS (Only runs if system is Unlocked) ---
+        # This is where you keep specific "always block" rules even if unlocked
         if "secret" in filename.lower():
-            print(f"🛑 [BLOCKED] User tried to open: {filename}")
+            print(f"🛑 [BLOCKED] access to sensitive file: {filename}")
             raise FuseOSError(errno.EACCES)
-        
-        print(f"✅ [ALLOWED] Accessing: {filename}")
+
+        # --- 3. ALLOW ACCESS ---
+        print(f"✅ [OPEN] Accessing: {filename}")
 
         # === THE FIX IS HERE ===
         # Windows sends complex flags that confuse Python. 
@@ -91,7 +99,14 @@ class Gatekeeper(Operations):
         return os.open(full_path, final_flags)
 
     # --- 4. READ ---
+    # --- 4. READ ---
     def read(self, path, length, offset, fh):
+        # 1. Check Lock again (Double security)
+        if self._get_lock_status():
+            print(f"🔒 [LOCKED] Read blocked for: {path}")
+            raise FuseOSError(errno.EACCES)
+            
+        # 2. Perform the read
         os.lseek(fh, offset, os.SEEK_SET)
         return os.read(fh, length)
 
