@@ -1,8 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 
-// 1. Go to Supabase Dashboard -> Project Settings -> API
-// 2. Paste the "URL" and "anon public" key here:
-const SUPABASE_URL = 'https://lwstwekouztglkoescog.supabase.co';
-const SUPABASE_ANON_KEY = 'sb_publishable_dmwRDftSHwm7PlapTWGlIg_rVHCrN9y';
+// 1. Load keys from .env (Vite)
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);

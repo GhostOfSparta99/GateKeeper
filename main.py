@@ -7,133 +7,130 @@ from fuse import FUSE, FuseOSError, Operations
 import requests
 
 # --- CONFIGURATION ---
-SUPABASE_URL = "https://lwstwekouztglkoescog.supabase.co"
-SUPABASE_KEY = "sb_publishable_dmwRDftSHwm7PlapTWGlIg_rVHCrN9y"
+SUPABASE_URL = "https://zkpgilfposjkshvtteto.supabase.co"
+SUPABASE_KEY = "sb_publishable_B04aDmwXy7U9i3SCvxggnw_wYLiIz2z"
 SOURCE_DIR = "my_hidden_data"
 MOUNT_POINT = "S:"
 
-# Helper class to mimic Supabase client using requests (High Performance Adapted)
+# --- HELPER: Database Client ---
 class NativeSupabase:
     def __init__(self, url, key):
         self.base_url = f"{url}/rest/v1"
-        self.headers = {
+        # Standard Headers (For Reading)
+        self.read_headers = {
             "apikey": key,
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json"
         }
-
-    def upsert_file(self, filename):
-        """Upsert a file into file_locks (POST with merge-duplicates)"""
-        url = f"{self.base_url}/file_locks?on_conflict=filename"
-        headers = self.headers.copy()
-        headers["Prefer"] = "resolution=merge-duplicates"
-        payload = {"filename": filename}
-        try:
-            requests.post(url, headers=headers, json=payload, timeout=2.0)
-        except Exception as e:
-            print(f"   ⚠️ Sync Upload Warning: {e}")
-
-    def delete_file(self, filename):
-        """Delete a file from file_locks"""
-        url = f"{self.base_url}/file_locks?filename=eq.{filename}"
-        try:
-            requests.delete(url, headers=self.headers, timeout=2.0)
-        except Exception as e:
-            print(f"   ⚠️ Sync Delete Warning: {e}")
-
-    def rename_file(self, old_name, new_name):
-        """Update filename in file_locks"""
-        url = f"{self.base_url}/file_locks?filename=eq.{old_name}"
-        payload = {"filename": new_name}
-        try:
-            requests.patch(url, headers=self.headers, json=payload, timeout=2.0)
-        except Exception as e:
-            print(f"   ⚠️ Sync Rename Warning: {e}")
+        # Write Headers (For Fast Updates)
+        self.write_headers = self.read_headers.copy()
+        self.write_headers["Prefer"] = "return=minimal"
 
     def get_all_locks(self):
         """Fetch ALL lock statuses at once"""
-        url = f"{self.base_url}/file_locks?select=filename,is_locked"
+        # CRITICAL FIX: Use read_headers (NO 'return=minimal')
+        url = f"{self.base_url}/file_locks?select=filename,is_locked&limit=1000"
         try:
-            r = requests.get(url, headers=self.headers, timeout=2.0)
+            r = requests.get(url, headers=self.read_headers, timeout=5.0)
             if r.status_code == 200:
                 return r.json()
-        except:
-            return []
+        except Exception as e:
+            print(f"   ⚠️ Sync Fetch Error: {e}")
         return []
 
-    def update_last_accessed(self, filename):
-        """Update last_accessed timestamp"""
-        url = f"{self.base_url}/file_locks?filename=eq.{filename}"
-        payload = {"last_accessed": "now()"}
-        try:
-            requests.patch(url, headers=self.headers, json=payload, timeout=0.5)
-        except:
-            pass
-
-    def create_new_file(self, filename):
+    def insert_file(self, filename):
         """Insert new file record"""
         url = f"{self.base_url}/file_locks"
         payload = {"filename": filename, "is_locked": False}
         try:
-            requests.post(url, headers=self.headers, json=payload, timeout=1.0)
+            # Use 'resolution=ignore-duplicates' to prevent errors
+            headers = self.write_headers.copy()
+            headers["Prefer"] = "resolution=ignore-duplicates,return=minimal"
+            requests.post(url, headers=headers, json=payload, timeout=2.0)
+        except Exception as e:
+            print(f"   ⚠️ Sync Insert Error: {e}")
+
+    def delete_file(self, filename):
+        """Delete file record"""
+        url = f"{self.base_url}/file_locks?filename=eq.{filename}"
+        try:
+            requests.delete(url, headers=self.write_headers, timeout=2.0)
+        except Exception as e:
+            print(f"   ⚠️ Sync Delete Error: {e}")
+
+    def rename_file(self, old_name, new_name):
+        url = f"{self.base_url}/file_locks?filename=eq.{old_name}"
+        payload = {"filename": new_name}
+        try:
+            requests.patch(url, headers=self.write_headers, json=payload, timeout=2.0)
+        except:
+            pass
+            
+    def update_last_accessed(self, filename):
+        url = f"{self.base_url}/file_locks?filename=eq.{filename}"
+        payload = {"last_accessed": "now()"}
+        try:
+            requests.patch(url, headers=self.write_headers, json=payload, timeout=0.5)
         except:
             pass
 
-# Initialize "Client"
+# Initialize Client
 db = NativeSupabase(SUPABASE_URL, SUPABASE_KEY)
 
+# --- FUSE FILESYSTEM ---
 class Gatekeeper(Operations):
     def __init__(self, root):
         self.root = root
-        # LOCAL CACHE: Stores 'filename': is_locked (True/False)
         self.lock_cache = {} 
         self.running = True
         
-        # Start Background Thread (Syncs Files & Locks)
+        # Start Background Thread
         self.bg_thread = threading.Thread(target=self._background_syncer, daemon=True)
         self.bg_thread.start()
 
+    def _is_valid_file(self, filename):
+        """FILTER: Ignore temp files"""
+        if filename.startswith("~$"): return False
+        if filename.startswith("."): return False
+        if filename.lower() == "desktop.ini": return False
+        if filename.lower().endswith(".tmp"): return False
+        return True
+
     def _background_syncer(self):
-        """
-        Runs in background: 
-        1. Pushes local file changes (New/Deleted) to DB
-        2. Pulls lock status from DB
-        """
-        print("🔄 Background Sync Active: Monitoring File System & Cloud...")
+        print("🔄 Background Sync Active...")
         while self.running:
             try:
-                # A. SCAN LOCAL FILES
+                # 1. SCAN LOCAL FILES
                 if os.path.exists(self.root):
-                    local_files = set(f for f in os.listdir(self.root) 
-                                    if os.path.isfile(os.path.join(self.root, f)))
+                    root_files = set(f for f in os.listdir(self.root) 
+                                   if os.path.isfile(os.path.join(self.root, f)) 
+                                   and self._is_valid_file(f))
                 else:
-                    local_files = set()
+                    root_files = set()
 
-                # B. FETCH REMOTE FILES
+                # 2. FETCH REMOTE FILES
                 remote_data = db.get_all_locks()
                 remote_map = {row['filename']: row['is_locked'] for row in remote_data}
                 remote_files = set(remote_map.keys())
 
-                # C. SYNC: UPLOAD NEW FILES (Local -> Cloud)
-                files_to_add = local_files - remote_files
-                for filename in files_to_add:
-                    print(f"   [SYNC] Found new file: {filename} -> Uploading to DB")
-                    db.create_new_file(filename)
-
-                # D. SYNC: REMOVE DELETED FILES (Cloud -> Clean DB)
-                files_to_remove = remote_files - local_files
-                for filename in files_to_remove:
-                    print(f"   [SYNC] File deleted locally: {filename} -> Removing from DB")
-                    db.delete_file(filename)
-
-                # E. UPDATE LOCK CACHE (For Cloud -> Local locking)
-                # We refresh our cache with the latest valid list
+                # Update Cache
                 self.lock_cache = remote_map
+
+                # 3. SYNC: UPLOAD NEW
+                files_to_add = root_files - remote_files
+                for filename in files_to_add:
+                    print(f"   [SYNC] Found new file: {filename}")
+                    db.insert_file(filename)
+
+                # 4. SYNC: REMOVE DELETED
+                files_to_remove = remote_files - root_files
+                for filename in files_to_remove:
+                    print(f"   [SYNC] Removing ghost file: {filename}")
+                    db.delete_file(filename)
                 
             except Exception as e:
-                print(f"⚠️ Sync Loop Error: {e}")
+                print(f"⚠️ Sync Error: {e}")
             
-            # Run this check every 2 seconds
             time.sleep(2.0)
 
     def _full_path(self, partial):
@@ -161,32 +158,56 @@ class Gatekeeper(Operations):
         for r in dirents:
             yield r
 
-    # --- OPEN FILE (Now Instant!) ---
+    # --- OPEN FILE ---
     def open(self, path, flags):
         full_path = self._full_path(path)
         filename = os.path.basename(path)
 
-        # 1. READ FROM LOCAL CACHE (Zero Latency)
-        # If file is not in cache, assume UNLOCKED (False) until proven otherwise
+        # Security Check
         is_locked = self.lock_cache.get(filename, False)
-
         if is_locked:
-            print(f"🔒 [BLOCKED CACHED] Access denied to: {filename}")
+            print(f"🔒 [BLOCKED] {filename}")
             raise FuseOSError(errno.EACCES)
         
-        # print(f"✅ [ALLOWED] {filename}") # Uncomment for verbose logs
+        # Async Stat Update
+        if self._is_valid_file(filename):
+            threading.Thread(target=db.update_last_accessed, args=(filename,)).start()
 
-        # Optional: Update last accessed in background
-        threading.Thread(target=db.update_last_accessed, args=(filename,)).start()
-
-        # === WINDOWS COMPATIBILITY FIX ===
+        # Windows Flags Fix
         access_flags = os.O_RDONLY | os.O_WRONLY | os.O_RDWR
         final_flags = flags & access_flags
         final_flags |= os.O_BINARY
 
         return os.open(full_path, final_flags)
 
-    # --- READ / WRITE / CREATE ---
+    # --- FILE MODIFICATIONS ---
+    def create(self, path, mode, fi=None):
+        full_path = self._full_path(path)
+        filename = os.path.basename(path)
+        self.lock_cache[filename] = False
+        if self._is_valid_file(filename):
+            threading.Thread(target=db.insert_file, args=(filename,)).start()
+        return os.open(full_path, os.O_WRONLY | os.O_CREAT | os.O_BINARY, mode)
+
+    def unlink(self, path):
+        full_path = self._full_path(path)
+        filename = os.path.basename(path)
+        os.unlink(full_path)
+        if self._is_valid_file(filename):
+            threading.Thread(target=db.delete_file, args=(filename,)).start()
+        if filename in self.lock_cache:
+            del self.lock_cache[filename]
+
+    def rename(self, old, new):
+        full_old = self._full_path(old)
+        full_new = self._full_path(new)
+        os.rename(full_old, full_new)
+        old_name = os.path.basename(old)
+        new_name = os.path.basename(new)
+        if self._is_valid_file(old_name) and self._is_valid_file(new_name):
+            threading.Thread(target=db.rename_file, args=(old_name, new_name)).start()
+
+    # --- STANDARD IO ---
     def read(self, path, length, offset, fh):
         os.lseek(fh, offset, os.SEEK_SET)
         return os.read(fh, length)
@@ -195,62 +216,32 @@ class Gatekeeper(Operations):
         os.lseek(fh, offset, os.SEEK_SET)
         return os.write(fh, buf)
 
-    def create(self, path, mode, fi=None):
-        full_path = self._full_path(path)
-        filename = os.path.basename(path)
-        
-        # Add to local cache immediately so we don't block ourselves
-        self.lock_cache[filename] = False
-        
-        # Async upload to DB (don't wait for it)
-        threading.Thread(target=db.create_new_file, args=(filename,)).start()
-        
-        return os.open(full_path, os.O_WRONLY | os.O_CREAT | os.O_BINARY, mode)
-
-    # --- UNLINK / DELETE (Instant DB Update) ---
-    def unlink(self, path):
-        full_path = self._full_path(path)
-        filename = os.path.basename(path)
-
-        print(f"🗑️  Deleting file: {filename}")
-        
-        # 1. Delete actual file
-        os.unlink(full_path)
-        
-        # 2. Remove from DB immediately
-        threading.Thread(target=db.delete_file, args=(filename,)).start()
-        
-        # 3. Remove from local cache
-        if filename in self.lock_cache:
-            del self.lock_cache[filename]
-
-    # --- RENAME (Update DB) ---
-    def rename(self, old, new):
-        full_old = self._full_path(old)
-        full_new = self._full_path(new)
-        
-        old_name = os.path.basename(old)
-        new_name = os.path.basename(new)
-
-        print(f"✏️  Renaming: {old_name} -> {new_name}")
-        
-        # 1. Rename actual file
-        os.rename(full_old, full_new)
-        
-        # 2. Update DB (Update the filename field)
-        threading.Thread(target=db.rename_file, args=(old_name, new_name)).start()
-
     def release(self, path, fh):
         return os.close(fh)
     
     def flush(self, path, fh):
         return os.fsync(fh)
+    
+    # --- WINDOWS FIXES ---
+    def utimens(self, path, times=None):
+        return os.utime(self._full_path(path), times)
+    
+    def truncate(self, path, length, fh=None):
+        full_path = self._full_path(path)
+        with open(full_path, 'r+') as f:
+            f.truncate(length)
+            
+    def chmod(self, path, mode):
+        return os.chmod(self._full_path(path), mode)
+    
+    def chown(self, path, uid, gid):
+        pass
 
 if __name__ == '__main__':
     if not os.path.exists(SOURCE_DIR):
         os.makedirs(SOURCE_DIR)
     
-    print(f"🚀 Gatekeeper v2.0 (Auto-Sync) Active on {MOUNT_POINT}")
+    print(f"🚀 Gatekeeper Active on {MOUNT_POINT}")
     try:
         FUSE(Gatekeeper(SOURCE_DIR), MOUNT_POINT, foreground=True, nothreads=False)
     except Exception as e:
