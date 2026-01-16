@@ -1,198 +1,132 @@
 import { useState, useEffect } from 'react';
-import { motion } from 'framer-motion';
-import { Sun, Moon, Shield } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Shield, FileText, Lock, Unlock } from 'lucide-react';
 import { useTheme } from './contexts/ThemeContext';
-import { StatusRing } from './components/StatusRing';
-import { ControlSwitch } from './components/ControlSwitch';
-import { LiveTerminal } from './components/LiveTerminal';
-// 1. IMPORT SUPABASE CONNECTION
 import { supabase } from './lib/supabase';
+
+// Data Type for our files
+interface FileNode {
+  id: number;
+  filename: string;
+  is_locked: boolean;
+  last_accessed: string | null;
+}
 
 function App() {
   const { theme, toggleTheme } = useTheme();
-  const [isLocked, setIsLocked] = useState(false);
+  const [files, setFiles] = useState<FileNode[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // 2. LOAD STATUS FROM DATABASE ON START
+  // 1. Fetch Files & Subscribe to Realtime Updates
   useEffect(() => {
-    fetchStatus();
+    fetchFiles();
 
-    // Listen for real-time changes
     const channel = supabase
-      .channel('schema-db-changes')
+      .channel('file_updates')
       .on(
         'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'system_status',
-          filter: 'id=eq.1',
-        },
+        { event: '*', schema: 'public', table: 'file_locks' },
         (payload) => {
-          setIsLocked(payload.new.is_locked);
+          // Refresh list on any change
+          fetchFiles();
         }
       )
       .subscribe();
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    return () => { supabase.removeChannel(channel); };
   }, []);
 
-  async function fetchStatus() {
-    try {
-      const { data, error } = await supabase
-        .from('system_status')
-        .select('is_locked')
-        .eq('id', 1)
-        .single();
-
-      if (data) setIsLocked(data.is_locked);
-    } catch (error) {
-      console.error('Error fetching status:', error);
-    } finally {
-      setLoading(false);
-    }
+  async function fetchFiles() {
+    const { data } = await supabase.from('file_locks').select('*').order('filename');
+    if (data) setFiles(data);
+    setLoading(false);
   }
 
-  // 3. UPDATE DATABASE WHEN CLICKED
-  const handleToggle = async () => {
-    const newState = !isLocked;
-    // Update UI immediately (optimistic update)
-    setIsLocked(newState);
+  // 2. Toggle Function
+  const toggleLock = async (id: number, currentStatus: boolean) => {
+    // Optimistic Update (update UI instantly)
+    setFiles(files.map(f => f.id === id ? { ...f, is_locked: !currentStatus } : f));
 
-    try {
-      const { error } = await supabase
-        .from('system_status')
-        .update({ is_locked: newState })
-        .eq('id', 1);
-
-      if (error) throw error;
-    } catch (error) {
-      console.error('Error updating status:', error);
-      // Revert if failed
-      setIsLocked(!newState);
-    }
+    // Send to DB
+    await supabase.from('file_locks').update({ is_locked: !currentStatus }).eq('id', id);
   };
 
   return (
-    <div
-      className={`min-h-screen transition-colors duration-500 ${theme === 'stealth'
-          ? 'bg-gradient-to-br from-gray-950 via-slate-900 to-gray-950'
-          : 'bg-gradient-to-br from-gray-50 via-white to-gray-100'
-        }`}
-    >
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div
-          className={`absolute top-0 left-1/4 w-96 h-96 rounded-full blur-3xl opacity-20 ${isLocked ? 'bg-red-500' : 'bg-emerald-500'
-            }`}
-        />
-        <div
-          className={`absolute bottom-0 right-1/4 w-96 h-96 rounded-full blur-3xl opacity-20 ${theme === 'stealth' ? 'bg-cyan-500' : 'bg-blue-500'
-            }`}
-        />
-      </div>
+    <div className={`min-h-screen transition-colors duration-500 ${theme === 'stealth' ? 'bg-gray-950 text-white' : 'bg-gray-50 text-gray-900'
+      }`}>
 
-      <div className="relative z-10 min-h-screen flex flex-col">
-        <header className="p-6">
-          <div className="max-w-7xl mx-auto flex items-center justify-between">
-            <motion.div
-              initial={{ x: -50, opacity: 0 }}
-              animate={{ x: 0, opacity: 1 }}
-              transition={{ duration: 0.5 }}
-              className="flex items-center gap-3"
-            >
-              <Shield
-                className={`w-8 h-8 ${theme === 'stealth' ? 'text-cyan-400' : 'text-blue-600'
-                  }`}
-              />
-              <div>
-                <h1
-                  className={`text-2xl font-bold ${theme === 'stealth' ? 'text-white' : 'text-gray-900'
-                    }`}
-                >
-                  GATEKEEPER
-                </h1>
-                <p
-                  className={`text-xs uppercase tracking-widest font-mono ${theme === 'stealth' ? 'text-cyan-400' : 'text-blue-600'
-                    }`}
-                >
-                  Command Interface
-                </p>
-              </div>
-            </motion.div>
-
-            <motion.button
-              initial={{ x: 50, opacity: 0 }}
-              animate={{ x: 0, opacity: 1 }}
-              transition={{ duration: 0.5 }}
-              onClick={toggleTheme}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg border transition-colors ${theme === 'stealth'
-                  ? 'bg-cyan-950/30 border-cyan-500/30 text-cyan-400 hover:bg-cyan-950/50'
-                  : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
-                }`}
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-            >
-              {theme === 'stealth' ? (
-                <>
-                  <Sun className="w-4 h-4" />
-                  <span className="text-sm font-mono">Day Mode</span>
-                </>
-              ) : (
-                <>
-                  <Moon className="w-4 h-4" />
-                  <span className="text-sm font-mono">Stealth Mode</span>
-                </>
-              )}
-            </motion.button>
+      {/* Header */}
+      <header className="p-6 border-b border-white/10">
+        <div className="max-w-4xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Shield className={theme === 'stealth' ? 'text-emerald-500' : 'text-blue-600'} />
+            <h1 className="text-xl font-bold tracking-wider">GATEKEEPER <span className="opacity-50 text-sm">| S: DRIVE MANAGER</span></h1>
           </div>
-        </header>
+          <button onClick={toggleTheme} className="text-xs font-mono opacity-60 hover:opacity-100">
+            SWITCH THEME
+          </button>
+        </div>
+      </header>
 
-        <main className="flex-1 flex flex-col items-center justify-center px-6 pb-12 gap-12">
-          {loading ? (
-            <div className="text-gray-500 font-mono animate-pulse">Connecting to Satellite...</div>
-          ) : (
-            <>
-              <motion.div
-                initial={{ y: 50, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                transition={{ duration: 0.6, delay: 0.2 }}
-              >
-                <StatusRing isLocked={isLocked} />
-              </motion.div>
+      {/* Main File Grid */}
+      <main className="max-w-4xl mx-auto p-6 mt-8">
+        {loading ? (
+          <div className="text-center animate-pulse font-mono">SCANNING DRIVE...</div>
+        ) : (
+          <div className="grid gap-4">
+            <AnimatePresence>
+              {files.map((file) => (
+                <motion.div
+                  key={file.id}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className={`p-4 rounded-xl border flex items-center justify-between transition-all ${file.is_locked
+                      ? 'border-red-500/30 bg-red-500/5'
+                      : 'border-emerald-500/30 bg-emerald-500/5'
+                    } ${theme !== 'stealth' && 'bg-white shadow-sm'}`}
+                >
+                  {/* File Info */}
+                  <div className="flex items-center gap-4">
+                    <div className={`p-3 rounded-lg ${file.is_locked ? 'bg-red-500/20 text-red-500' : 'bg-emerald-500/20 text-emerald-500'}`}>
+                      <FileText size={24} />
+                    </div>
+                    <div>
+                      <h3 className="font-mono font-bold text-lg">{file.filename}</h3>
+                      <p className="text-xs opacity-50 font-mono">
+                        {file.is_locked ? 'ACCESS DENIED' : 'wkspc: S:/' + file.filename}
+                      </p>
+                    </div>
+                  </div>
 
-              <motion.div
-                initial={{ y: 50, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                transition={{ duration: 0.6, delay: 0.4 }}
-              >
-                {/* CONNECTED SWITCH COMPONENT */}
-                <ControlSwitch
-                  isLocked={isLocked}
-                  onToggle={handleToggle}
-                />
-              </motion.div>
-            </>
-          )}
+                  {/* Toggle Switch */}
+                  <button
+                    onClick={() => toggleLock(file.id, file.is_locked)}
+                    className={`relative w-16 h-8 rounded-full transition-colors duration-300 flex items-center px-1 ${file.is_locked ? 'bg-red-500' : 'bg-emerald-500'
+                      }`}
+                  >
+                    <motion.div
+                      className="w-6 h-6 bg-white rounded-full shadow-md flex items-center justify-center"
+                      animate={{ x: file.is_locked ? 32 : 0 }}
+                      transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                    >
+                      {file.is_locked ? <Lock size={12} className="text-red-500" /> : <Unlock size={12} className="text-emerald-500" />}
+                    </motion.div>
+                  </button>
 
-          <motion.div
-            initial={{ y: 50, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            transition={{ duration: 0.6, delay: 0.6 }}
-            className="w-full px-4"
-          >
-            <LiveTerminal />
-          </motion.div>
-        </main>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          </div>
+        )}
 
-        <footer
-          className={`p-4 text-center text-xs font-mono ${theme === 'stealth' ? 'text-gray-600' : 'text-gray-500'
-            }`}
-        >
-          <p>Gatekeeper FS v1.0.0 | Remote Granular Access Control System</p>
-        </footer>
-      </div>
+        {files.length === 0 && !loading && (
+          <div className="text-center opacity-50 font-mono mt-10">
+            NO FILES DETECTED IN S: DRIVE
+            <br />
+            <span className="text-xs">Add files to 'my_hidden_data' and restart Python script</span>
+          </div>
+        )}
+      </main>
     </div>
   );
 }
