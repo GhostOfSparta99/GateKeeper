@@ -110,7 +110,7 @@ class Gatekeeper(Operations):
 
                 # 2. FETCH REMOTE FILES
                 remote_data = db.get_all_locks()
-                remote_map = {row['filename']: row['is_locked'] for row in remote_data}
+                remote_map = {row['filename'].lower(): row['is_locked'] for row in remote_data}
                 remote_files = set(remote_map.keys())
 
                 # Update Cache
@@ -163,10 +163,10 @@ class Gatekeeper(Operations):
         full_path = self._full_path(path)
         filename = os.path.basename(path)
 
-        # Security Check
-        is_locked = self.lock_cache.get(filename, False)
+        # Security Check (Case-Insensitive)
+        is_locked = self.lock_cache.get(filename.lower(), False)
         if is_locked:
-            print(f"🔒 [BLOCKED] {filename}")
+            print(f"🔒 [BLOCKED OPEN] {filename}")
             raise FuseOSError(errno.EACCES)
         
         # Async Stat Update
@@ -209,10 +209,22 @@ class Gatekeeper(Operations):
 
     # --- STANDARD IO ---
     def read(self, path, length, offset, fh):
+        # Security Check (Enforce on READ)
+        filename = os.path.basename(path)
+        if self.lock_cache.get(filename.lower(), False):
+            print(f"🔒 [BLOCKED READ] {filename}")
+            raise FuseOSError(errno.EACCES)
+
         os.lseek(fh, offset, os.SEEK_SET)
         return os.read(fh, length)
 
     def write(self, path, buf, offset, fh):
+        # Security Check (Enforce on WRITE)
+        filename = os.path.basename(path)
+        if self.lock_cache.get(filename.lower(), False):
+            print(f"🔒 [BLOCKED WRITE] {filename}")
+            raise FuseOSError(errno.EACCES)
+
         os.lseek(fh, offset, os.SEEK_SET)
         return os.write(fh, buf)
 
